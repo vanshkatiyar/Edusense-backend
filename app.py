@@ -9,15 +9,15 @@ from flask_limiter.util import get_remote_address
 from functools import wraps
 from datetime import datetime, time
 
-# --- SETUP, MODELS, DB CREATION, AUTH DECORATORS (All Unchanged) ---
-# ... (This entire section of code remains exactly the same as before) ...
 # --- 1. SETUP ---
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+# This line is critical for production deployment
+CORS(app, resources={r"/api/*": {"origins": os.environ.get('CORS_ORIGIN')}}, supports_credentials=True)
 basedir = os.path.abspath(os.path.dirname(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'rooms.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'a-super-secret-key-that-you-should-change-later'
+# Use an environment variable for the secret key
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'default-secret-key-for-local-dev')
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
@@ -110,68 +110,49 @@ def login():
         return jsonify(access_token=access_token, user=user.to_dict())
     return jsonify({"msg": "Invalid credentials"}), 401
 
-# --- CORRECTED: Combined GET and POST for /api/rooms ---
 @app.route('/api/rooms', methods=['GET', 'POST'])
 @jwt_required()
 def handle_rooms():
     if request.method == 'POST':
-        # Admin check for POST request
         user_identity = get_jwt_identity()
         user = User.query.filter_by(email=user_identity).first()
         if not user or user.role != 'admin':
             return jsonify(msg="Insufficient permissions!"), 403
-        
-        # Create room logic
         data = request.get_json()
-        name = data.get('name')
-        branch = data.get('branch')
-        if not name or not branch:
-            return jsonify({"msg": "Room name and branch are required."}), 400
-        if Room.query.filter_by(name=name).first():
-            return jsonify({"msg": f"A room with the name '{name}' already exists."}), 409
+        name, branch = data.get('name'), data.get('branch')
+        if not name or not branch: return jsonify({"msg": "Room name and branch are required."}), 400
+        if Room.query.filter_by(name=name).first(): return jsonify({"msg": f"A room with the name '{name}' already exists."}), 409
         new_room = Room(name=name, branch=branch)
         db.session.add(new_room)
         db.session.commit()
         return jsonify(new_room.to_dict()), 201
-
-    else: # This handles the GET request
+    else:
         now = datetime.now()
         rooms = Room.query.all()
         for room in rooms:
             if room.end_time and room.end_time < now:
-                room.batch_name = None
-                room.start_time = None
-                room.end_time = None
+                room.batch_name, room.start_time, room.end_time = None, None, None
         db.session.commit()
         return jsonify([r.to_dict() for r in rooms])
 
-# --- CORRECTED: Combined PUT and DELETE for /api/rooms/<id> ---
 @app.route('/api/rooms/<int:room_id>', methods=['PUT', 'DELETE'])
 @admin_required
 def handle_room_by_id(room_id):
     room = db.get_or_404(Room, room_id)
-    
     if request.method == 'PUT':
         data = request.get_json()
-        name = data.get('name')
-        branch = data.get('branch')
-        if not name or not branch:
-            return jsonify({"msg": "Room name and branch are required."}), 400
+        name, branch = data.get('name'), data.get('branch')
+        if not name or not branch: return jsonify({"msg": "Room name and branch are required."}), 400
         existing_room = Room.query.filter_by(name=name).first()
-        if existing_room and existing_room.id != room_id:
-            return jsonify({"msg": f"A room with the name '{name}' already exists."}), 409
-        room.name = name
-        room.branch = branch
+        if existing_room and existing_room.id != room_id: return jsonify({"msg": f"A room with the name '{name}' already exists."}), 409
+        room.name, room.branch = name, branch
         db.session.commit()
         return jsonify(room.to_dict())
-
-    else: # This handles the DELETE request
+    else:
         db.session.delete(room)
         db.session.commit()
         return jsonify({"msg": f"Room '{room.name}' has been deleted."})
 
-
-# --- The rest of the endpoints are unchanged ---
 @app.route('/api/analytics', methods=['GET'])
 @jwt_required()
 def get_analytics():
@@ -189,19 +170,15 @@ def set_schedule(room_id):
     room = db.get_or_404(Room, room_id)
     data = request.get_json()
     if not data or not data.get('batch_name'):
-        room.batch_name = None
-        room.start_time = None
-        room.end_time = None
+        room.batch_name, room.start_time, room.end_time = None, None, None
     else:
         try:
             start_t = time.fromisoformat(data['start_time'])
             end_t = time.fromisoformat(data['end_time'])
             today = datetime.now().date()
-            room.start_time = datetime.combine(today, start_t)
-            room.end_time = datetime.combine(today, end_t)
-            room.batch_name = data['batch_name']
+            room.start_time, room.end_time, room.batch_name = datetime.combine(today, start_t), datetime.combine(today, end_t), data['batch_name']
         except (ValueError, KeyError):
-            return jsonify({"msg": "Invalid data format. Required: batch_name, start_time (HH:MM), end_time (HH:MM)"}), 400
+            return jsonify({"msg": "Invalid data format."}), 400
     db.session.commit()
     return jsonify(room.to_dict())
 
@@ -225,12 +202,10 @@ def set_occupancy(room_id):
     db.session.commit()
     return jsonify(room.to_dict())
 
-# ... (User management endpoints remain the same) ...
 @app.route('/api/users', methods=['GET'])
 @admin_required
 def get_users():
-    users = User.query.all()
-    return jsonify([user.to_dict() for user in users])
+    return jsonify([user.to_dict() for user in User.query.all()])
 
 @app.route('/api/users', methods=['POST'])
 @admin_required
@@ -252,8 +227,7 @@ def update_user_role(user_id):
     data = request.get_json()
     new_role = data.get('role')
     if new_role not in ['admin', 'teacher', 'student']: return jsonify({"msg": "Invalid role"}), 400
-    current_user_email = get_jwt_identity()
-    current_user = User.query.filter_by(email=current_user_email).first()
+    current_user = User.query.filter_by(email=get_jwt_identity()).first()
     if current_user.id == user_to_update.id and new_role != 'admin': return jsonify({"msg": "Admin cannot demote themselves"}), 403
     user_to_update.role = new_role
     db.session.commit()
@@ -263,13 +237,11 @@ def update_user_role(user_id):
 @admin_required
 def delete_user(user_id):
     user_to_delete = db.get_or_404(User, user_id)
-    current_user_email = get_jwt_identity()
-    current_user = User.query.filter_by(email=current_user_email).first()
+    current_user = User.query.filter_by(email=get_jwt_identity()).first()
     if current_user.id == user_to_delete.id: return jsonify({"msg": "Cannot delete yourself"}), 403
     db.session.delete(user_to_delete)
     db.session.commit()
     return jsonify({"msg": f"User {user_to_delete.email} deleted"}), 200
-
 
 if __name__ == '__main__':
     app.run(debug=True)
