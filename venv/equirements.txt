@@ -1,0 +1,15 @@
+bcrypt
+click
+Flask
+Flask-Bcrypt
+Flask-Cors
+Flask-JWT-Extended
+Flask-Limiter
+Flask-SQLAlchemy
+gunicorn  # <-- The production server
+itsdangerous
+Jinja2
+MarkupSafe
+PyJWT
+SQLAlchemy
+Werkzeug
